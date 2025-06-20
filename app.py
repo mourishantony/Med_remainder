@@ -9,6 +9,7 @@ load_dotenv()
 import os
 import sys
 import smtplib
+import sqlite3
 from email.mime.text import MIMEText
 
 EMAIL_ENABLED = True
@@ -27,7 +28,6 @@ TWILIO_CONFIG = {
     "from_number": os.getenv("TWILIO_FROM_NUMBER"),
     "to_number": os.getenv("TWILIO_TO_NUMBER")
 }
-
 
 try:
     from twilio.rest import Client
@@ -63,7 +63,7 @@ try:
 except ImportError:
     TRAY_ENABLED = False
 
-DATA_FILE = 'reminders.json'
+DB_FILE = 'reminders.db'
 
 def play_sound():
     if SOUND_ENABLED:
@@ -106,6 +106,97 @@ def show_tray_notification(title, msg):
     else:
         pass  # fallback: do nothing
 
+class ReminderDatabase:
+    def __init__(self, db_file=DB_FILE):
+        self.db_file = db_file
+        self.conn = sqlite3.connect(self.db_file, check_same_thread=False)
+        self.create_table()
+
+    def create_table(self):
+        cur = self.conn.cursor()
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            dosage TEXT NOT NULL,
+            time TEXT NOT NULL,
+            repeat TEXT NOT NULL,
+            interval INTEGER NOT NULL,
+            notified INTEGER NOT NULL,
+            taken INTEGER NOT NULL
+        )
+        ''')
+        self.conn.commit()
+
+    def add_reminder(self, reminder):
+        cur = self.conn.cursor()
+        cur.execute('''
+            INSERT INTO reminders (name, dosage, time, repeat, interval, notified, taken)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (reminder['name'], reminder['dosage'], reminder['time'],
+              reminder['repeat'], reminder['interval'],
+              int(reminder['notified']), int(reminder['taken'])))
+        self.conn.commit()
+
+    def update_reminder(self, idx, reminder):
+        cur = self.conn.cursor()
+        cur.execute('''
+            UPDATE reminders SET
+                name = ?,
+                dosage = ?,
+                time = ?,
+                repeat = ?,
+                interval = ?,
+                notified = ?,
+                taken = ?
+            WHERE id = ?
+        ''', (reminder['name'], reminder['dosage'], reminder['time'],
+              reminder['repeat'], reminder['interval'],
+              int(reminder['notified']), int(reminder['taken']), idx))
+        self.conn.commit()
+
+    def delete_reminder(self, idx):
+        cur = self.conn.cursor()
+        cur.execute('DELETE FROM reminders WHERE id = ?', (idx,))
+        self.conn.commit()
+
+    def get_reminders(self):
+        cur = self.conn.cursor()
+        cur.execute('SELECT id, name, dosage, time, repeat, interval, notified, taken FROM reminders')
+        result = []
+        for row in cur.fetchall():
+            result.append({
+                'id': row[0],
+                'name': row[1],
+                'dosage': row[2],
+                'time': row[3],
+                'repeat': row[4],
+                'interval': row[5],
+                'notified': bool(row[6]),
+                'taken': bool(row[7])
+            })
+        return result
+
+    def get_reminder_by_id(self, idx):
+        cur = self.conn.cursor()
+        cur.execute('SELECT id, name, dosage, time, repeat, interval, notified, taken FROM reminders WHERE id = ?', (idx,))
+        row = cur.fetchone()
+        if row:
+            return {
+                'id': row[0],
+                'name': row[1],
+                'dosage': row[2],
+                'time': row[3],
+                'repeat': row[4],
+                'interval': row[5],
+                'notified': bool(row[6]),
+                'taken': bool(row[7])
+            }
+        return None
+
+    def close(self):
+        self.conn.close()
+
 class MedicineReminderApp:
     def __init__(self, root):
         self.root = root
@@ -114,8 +205,8 @@ class MedicineReminderApp:
         self.root.resizable(False, False)
         self.theme = 'light'
         self.snooze_minutes = 10
-        self.reminders = []
-        self.load_reminders()
+        self.db = ReminderDatabase()
+        self.reminders = self.db.get_reminders()
 
         self.setup_styles()
         self.create_widgets()
@@ -268,8 +359,8 @@ class MedicineReminderApp:
             'notified': False,
             'taken': False
         }
-        self.reminders.append(reminder)
-        self.save_reminders()
+        self.db.add_reminder(reminder)
+        self.reminders = self.db.get_reminders()
         self.update_reminders_list()
         self.clear_inputs()
 
@@ -282,6 +373,7 @@ class MedicineReminderApp:
         self.on_repeat_change(None)
 
     def update_reminders_list(self):
+        self.reminders = self.db.get_reminders()
         self.reminders.sort(key=lambda x: x['time'])
         self.reminders_list.delete(0, tk.END)
         now = datetime.now()
@@ -296,15 +388,11 @@ class MedicineReminderApp:
             self.reminders_list.insert(tk.END, f"{rem['name']} | {rem['dosage']} | {tstr} | {repeat}{extra}")
 
     def save_reminders(self):
-        with open(DATA_FILE, 'w') as f:
-            json.dump(self.reminders, f, indent=2)
+        # No longer needed, database handles saving
+        pass
 
     def load_reminders(self):
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, 'r') as f:
-                self.reminders = json.load(f)
-        else:
-            self.reminders = []
+        self.reminders = self.db.get_reminders()
 
     def reload_reminders(self):
         self.load_reminders()
@@ -348,57 +436,69 @@ class MedicineReminderApp:
             except Exception:
                 messagebox.showerror("Input Error", "Invalid interval.")
                 return
-        rem['name'] = new_name
-        rem['dosage'] = new_dosage
-        rem['time'] = scheduled_time.strftime('%Y-%m-%d %H:%M')
-        rem['repeat'] = new_repeat
-        rem['interval'] = new_interval
-        rem['notified'] = False
-        rem['taken'] = False
-        self.save_reminders()
+        updated_rem = {
+            'name': new_name,
+            'dosage': new_dosage,
+            'time': scheduled_time.strftime('%Y-%m-%d %H:%M'),
+            'repeat': new_repeat,
+            'interval': new_interval,
+            'notified': False,
+            'taken': False
+        }
+        self.db.update_reminder(rem['id'], updated_rem)
+        self.reminders = self.db.get_reminders()
         self.update_reminders_list()
 
     def delete_selected_reminder(self):
         idx = self.get_selected_index()
         if idx is None:
             return
+        rem = self.reminders[idx]
         res = messagebox.askyesno("Delete?", "Are you sure you want to delete this reminder?")
         if res:
-            self.reminders.pop(idx)
-            self.save_reminders()
+            self.db.delete_reminder(rem['id'])
+            self.reminders = self.db.get_reminders()
             self.update_reminders_list()
 
     def mark_as_taken(self):
         idx = self.get_selected_index()
         if idx is None:
             return
-        self.reminders[idx]['taken'] = True
-        self.save_reminders()
+        rem = self.reminders[idx]
+        updated_rem = rem.copy()
+        updated_rem['taken'] = True
+        self.db.update_reminder(rem['id'], updated_rem)
+        self.reminders = self.db.get_reminders()
         self.update_reminders_list()
 
     def snooze_reminder(self):
         idx = self.get_selected_index()
         if idx is None:
             return
+        rem = self.reminders[idx]
         snooze_time = simpledialog.askinteger("Snooze", "Snooze for how many minutes?", initialvalue=self.snooze_minutes)
         if snooze_time:
-            t = datetime.strptime(self.reminders[idx]['time'], "%Y-%m-%d %H:%M")
+            t = datetime.strptime(rem['time'], "%Y-%m-%d %H:%M")
             t += timedelta(minutes=snooze_time)
-            self.reminders[idx]['time'] = t.strftime('%Y-%m-%d %H:%M')
-            self.reminders[idx]['notified'] = False
-            self.save_reminders()
+            updated_rem = rem.copy()
+            updated_rem['time'] = t.strftime('%Y-%m-%d %H:%M')
+            updated_rem['notified'] = False
+            self.db.update_reminder(rem['id'], updated_rem)
+            self.reminders = self.db.get_reminders()
             self.update_reminders_list()
             messagebox.showinfo("Snoozed", f"Snoozed for {snooze_time} minutes.")
 
     def check_reminders(self):
         while self.running:
             now = datetime.now().replace(second=0, microsecond=0)
-            for rem in self.reminders:
+            for rem in self.db.get_reminders():
                 rem_time = datetime.strptime(rem['time'], "%Y-%m-%d %H:%M")
                 if rem_time <= now and not rem.get('notified', False) and not rem.get('taken', False):
                     self.show_reminder(rem)
-                    rem['notified'] = True
-                    self.save_reminders()
+                    # update notified status in db
+                    updated_rem = rem.copy()
+                    updated_rem['notified'] = True
+                    self.db.update_reminder(rem['id'], updated_rem)
             time.sleep(30)
 
     def show_reminder(self, reminder):
@@ -409,33 +509,35 @@ class MedicineReminderApp:
             send_email("Medicine Reminder", msg)
             make_call(f"Reminder! It's time to take your medicine {reminder['name']}, dosage {reminder['dosage']}.")
             res = messagebox.askyesnocancel("Medicine Reminder", msg + "\n\nTaken? Yes, Snooze, or Cancel.")
+            updated_rem = reminder.copy()
             if res is True:
-                reminder['taken'] = True
+                updated_rem['taken'] = True
             elif res is False:
                 snooze = simpledialog.askinteger("Snooze", "Snooze for how many minutes?", initialvalue=10)
                 if snooze:
                     t = datetime.strptime(reminder['time'], "%Y-%m-%d %H:%M")
-                    t += timedelta(minutes=snooze)
-                    reminder['time'] = t.strftime('%Y-%m-%d %H:%M')
-                    reminder['notified'] = False
+                    updated_rem['time'] = t + timedelta(minutes=snooze)
+                    updated_rem['time'] = updated_rem['time'].strftime('%Y-%m-%d %H:%M')
+                    updated_rem['notified'] = False
             # Recurring logic
-            if reminder['repeat'] == 'Daily' and (reminder['taken'] or res is not None):
-                t = datetime.strptime(reminder['time'], "%Y-%m-%d %H:%M") + timedelta(days=1)
-                reminder['time'] = t.strftime('%Y-%m-%d %H:%M')
-                reminder['notified'] = False
-                reminder['taken'] = False
-            elif reminder['repeat'] == 'Weekly' and (reminder['taken'] or res is not None):
-                t = datetime.strptime(reminder['time'], "%Y-%m-%d %H:%M") + timedelta(days=7)
-                reminder['time'] = t.strftime('%Y-%m-%d %H:%M')
-                reminder['notified'] = False
-                reminder['taken'] = False
-            elif reminder['repeat'] == 'Custom' and (reminder['taken'] or res is not None):
+            if reminder['repeat'] == 'Daily' and (updated_rem['taken'] or res is not None):
+                t = datetime.strptime(updated_rem['time'], "%Y-%m-%d %H:%M") + timedelta(days=1)
+                updated_rem['time'] = t.strftime('%Y-%m-%d %H:%M')
+                updated_rem['notified'] = False
+                updated_rem['taken'] = False
+            elif reminder['repeat'] == 'Weekly' and (updated_rem['taken'] or res is not None):
+                t = datetime.strptime(updated_rem['time'], "%Y-%m-%d %H:%M") + timedelta(days=7)
+                updated_rem['time'] = t.strftime('%Y-%m-%d %H:%M')
+                updated_rem['notified'] = False
+                updated_rem['taken'] = False
+            elif reminder['repeat'] == 'Custom' and (updated_rem['taken'] or res is not None):
                 interval = reminder.get('interval', 1)
-                t = datetime.strptime(reminder['time'], "%Y-%m-%d %H:%M") + timedelta(days=interval)
-                reminder['time'] = t.strftime('%Y-%m-%d %H:%M')
-                reminder['notified'] = False
-                reminder['taken'] = False
-            self.save_reminders()
+                t = datetime.strptime(updated_rem['time'], "%Y-%m-%d %H:%M") + timedelta(days=interval)
+                updated_rem['time'] = t.strftime('%Y-%m-%d %H:%M')
+                updated_rem['notified'] = False
+                updated_rem['taken'] = False
+            self.db.update_reminder(reminder['id'], updated_rem)
+            self.reminders = self.db.get_reminders()
             self.update_reminders_list()
         self.root.after(0, popup)
 
@@ -461,6 +563,7 @@ class MedicineReminderApp:
 
     def on_closing(self):
         self.running = False
+        self.db.close()
         self.root.destroy()
 
 if __name__ == "__main__":
