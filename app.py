@@ -9,7 +9,8 @@ load_dotenv()
 import os
 import sys
 import smtplib
-import sqlite3
+from pymongo import MongoClient
+from bson.objectid import ObjectId
 from email.mime.text import MIMEText
 
 # Configuration
@@ -63,7 +64,6 @@ try:
 except ImportError:
     TRAY_ENABLED = False
 
-DB_FILE = 'reminders.db'
 
 def play_sound():
     if SOUND_ENABLED:
@@ -105,99 +105,49 @@ def show_tray_notification(title, msg):
         icon.stop()
 
 class ReminderDatabase:
-    def __init__(self, db_file=DB_FILE):
-        self.db_file = db_file
-        self.conn = sqlite3.connect(self.db_file, check_same_thread=False)
-        self.create_table()
-
-    def create_table(self):
-        cur = self.conn.cursor()
-        cur.execute('''
-        CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            dosage TEXT NOT NULL,
-            time TEXT NOT NULL,
-            repeat TEXT NOT NULL,
-            interval INTEGER NOT NULL,
-            notified INTEGER NOT NULL,
-            taken INTEGER NOT NULL,
-            enabled INTEGER NOT NULL DEFAULT 1
-        )
-        ''')
-        self.conn.commit()
+    def __init__(self, db_url='mongodb://localhost:27017/', db_name='reminder_db', collection_name='reminders'):
+        self.client = MongoClient(db_url)
+        self.db = self.client[db_name]
+        self.collection = self.db[collection_name]
 
     def add_reminder(self, reminder):
-        cur = self.conn.cursor()
-        cur.execute('''
-            INSERT INTO reminders (name, dosage, time, repeat, interval, notified, taken, enabled)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (reminder['name'], reminder['dosage'], reminder['time'],
-              reminder['repeat'], reminder['interval'],
-              int(reminder['notified']), int(reminder['taken']), int(reminder.get('enabled', True))))
-        self.conn.commit()
+        reminder['notified'] = bool(reminder['notified'])
+        reminder['taken'] = bool(reminder['taken'])
+        reminder['enabled'] = bool(reminder.get('enabled', True))
+        self.collection.insert_one(reminder)
 
     def update_reminder(self, idx, reminder):
-        cur = self.conn.cursor()
-        cur.execute('''
-            UPDATE reminders SET
-                name = ?,
-                dosage = ?,
-                time = ?,
-                repeat = ?,
-                interval = ?,
-                notified = ?,
-                taken = ?,
-                enabled = ?
-            WHERE id = ?
-        ''', (reminder['name'], reminder['dosage'], reminder['time'],
-              reminder['repeat'], reminder['interval'],
-              int(reminder['notified']), int(reminder['taken']), int(reminder.get('enabled', True)), idx))
-        self.conn.commit()
+        reminder['notified'] = bool(reminder['notified'])
+        reminder['taken'] = bool(reminder['taken'])
+        reminder['enabled'] = bool(reminder.get('enabled', True))
+        self.collection.update_one(
+            {'_id': ObjectId(idx)},
+            {'$set': reminder}
+        )
 
     def delete_reminder(self, idx):
-        cur = self.conn.cursor()
-        cur.execute('DELETE FROM reminders WHERE id = ?', (idx,))
-        self.conn.commit()
+        self.collection.delete_one({'_id': ObjectId(idx)})
 
     def get_reminders(self):
-        cur = self.conn.cursor()
-        cur.execute('SELECT id, name, dosage, time, repeat, interval, notified, taken, enabled FROM reminders')
         result = []
-        for row in cur.fetchall():
-            result.append({
-                'id': row[0],
-                'name': row[1],
-                'dosage': row[2],
-                'time': row[3],
-                'repeat': row[4],
-                'interval': row[5],
-                'notified': bool(row[6]),
-                'taken': bool(row[7]),
-                'enabled': bool(row[8]) if len(row) > 8 else True
-            })
+        for doc in self.collection.find():
+            reminder = doc.copy()
+            reminder['id'] = str(doc['_id'])
+            del reminder['_id']
+            result.append(reminder)
         return result
 
     def get_reminder_by_id(self, idx):
-        cur = self.conn.cursor()
-        cur.execute('SELECT id, name, dosage, time, repeat, interval, notified, taken, enabled FROM reminders WHERE id = ?', (idx,))
-        row = cur.fetchone()
-        if row:
-            return {
-                'id': row[0],
-                'name': row[1],
-                'dosage': row[2],
-                'time': row[3],
-                'repeat': row[4],
-                'interval': row[5],
-                'notified': bool(row[6]),
-                'taken': bool(row[7]),
-                'enabled': bool(row[8]) if len(row) > 8 else True
-            }
+        doc = self.collection.find_one({'_id': ObjectId(idx)})
+        if doc:
+            reminder = doc.copy()
+            reminder['id'] = str(doc['_id'])
+            del reminder['_id']
+            return reminder
         return None
 
     def close(self):
-        self.conn.close()
+        self.client.close()
 
 class ModernReminderDialog:
     def __init__(self, parent, reminder=None):
