@@ -1,0 +1,9 @@
+{
+  "email_address": "email_address_here",
+  "email_password": "email_password_here",
+  "recipient_email": "recipient_email_here",
+  "twilio_account_sid": "some_account_sid_here",
+  "twilio_auth_token": "some_auth_token_here",
+  "twilio_from_number": "twilio_from_number_here",
+  "twilio_to_number": "twilio_to_number_here"
+}
