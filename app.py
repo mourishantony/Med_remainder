@@ -456,7 +456,7 @@ class SettingsDialog:
 #  Database
 # ─────────────────────────────────────────────
 class ReminderDatabase:
-    def __init__(self, db_url='mongodb://localhost:27017/', db_name='reminder_db', collection_name='reminders'):
+    def __init__(self, db_url=os.getenv('MONGO_URI', 'mongodb://localhost:27017/'), db_name='reminder_db', collection_name='reminders'):
         self.client = MongoClient(db_url)
         self.db = self.client[db_name]
         self.collection = self.db[collection_name]
